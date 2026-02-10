@@ -29,7 +29,7 @@ export const launchScraping = async (req: AuthRequest, res: Response) => {
         // 2. Trigger real scraping via n8n webhook
         // We send the execution.id as id_scraping to n8n
         try {
-            await axios.post('https://n8n.hubcapture.com/webhook-test/placessearch',
+            await axios.post('https://n8n.hubcapture.com/webhook/placessearch',
                 { id_scraping: execution.id },
                 {
                     headers: {
