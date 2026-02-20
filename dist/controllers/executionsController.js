@@ -3,9 +3,10 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getCategories = exports.updateExecutionStatus = exports.getExecutionResults = exports.getExecutionById = exports.getExecutions = exports.launchScraping = void 0;
+exports.getExecutions = exports.launchScraping = void 0;
 const db_1 = require("../config/db");
-const axios_1 = __importDefault(require("axios"));
+const fs_1 = __importDefault(require("fs"));
+const path_1 = __importDefault(require("path"));
 const launchScraping = async (req, res) => {
     const { search_term, location, language, country, city, state, continent, postal_code, latitude, longitude, category, has_website, exact_name } = req.body;
     try {
@@ -19,132 +20,54 @@ const launchScraping = async (req, res) => {
             has_website, exact_name
         ]);
         const execution = executionResult.rows[0];
-        // 2. Trigger real scraping via n8n webhook
-        // We send the execution.id as id_scraping to n8n
-        try {
-            await axios_1.default.post('https://n8n.hubcapture.com/webhook-test/placessearch', { id_scraping: execution.id }, {
-                headers: {
-                    'api-key': 'R5TSX1aBiQk4HCaXjEKGAZgrU2fhVt97EqFXiUMoV38',
-                    'Content-Type': 'application/json'
-                }
-            });
-        }
-        catch (webhookError) {
-            console.error('Error triggering n8n webhook:', webhookError.message);
-            // We still return 201 because the execution was created, but we log the error
+        // 2. Simulate scraping by reading from data.json (as requested)
+        // In a real scenario, this would trigger a professional scraper
+        const dataPath = path_1.default.join(__dirname, '../../../data.json');
+        const rawData = fs_1.default.readFileSync(dataPath, 'utf8');
+        const placesData = JSON.parse(rawData);
+        // 3. Save places and link to execution
+        for (const place of placesData) {
+            // Use google_place_id to avoid duplicates in the global places table
+            // In data.json, the place_id is part of the URL, we can extract it or use a hash
+            const urlParams = new URLSearchParams(place.url.split('?')[1]);
+            const gPlaceId = urlParams.get('query_place_id') || `custom_${Math.random().toString(36).substr(2, 9)}`;
+            const upsertPlace = await (0, db_1.query)(`INSERT INTO places 
+        (google_place_id, title, image_url, total_score, reviews_count, street, city, state, country_code, website, phone, category_name, maps_url)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT (google_place_id) DO UPDATE SET
+          title = EXCLUDED.title,
+          image_url = EXCLUDED.image_url,
+          total_score = EXCLUDED.total_score,
+          reviews_count = EXCLUDED.reviews_count,
+          updated_at = NOW()
+        RETURNING id`, [
+                gPlaceId, place.title, place.imageUrl, place.totalScore,
+                place.reviewsCount, place.street, place.city, place.state,
+                place.countryCode, place.website, place.phone, place.categoryName, place.url
+            ]);
+            const placeId = upsertPlace.rows[0].id;
+            await (0, db_1.query)('INSERT INTO execution_results (execution_id, place_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [execution.id, placeId]);
         }
         res.status(201).json({
-            message: 'Scraping localized and triggered via n8n',
-            execution_id: execution.id
+            message: 'Scraping localized and processed',
+            execution_id: execution.id,
+            count: placesData.length
         });
     }
     catch (error) {
         console.error(error);
-        res.status(500).json({ message: 'Internal server error during scraping launch' });
+        res.status(500).json({ message: 'Internal server error during scraping simulation' });
     }
 };
 exports.launchScraping = launchScraping;
 const getExecutions = async (req, res) => {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const offset = (page - 1) * limit;
     try {
-        const dataPromise = (0, db_1.query)('SELECT * FROM scraping_executions WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3', [req.user.id, limit, offset]);
-        const countPromise = (0, db_1.query)('SELECT COUNT(*) FROM scraping_executions WHERE user_id = $1', [req.user.id]);
-        const [dataResult, countResult] = await Promise.all([dataPromise, countPromise]);
-        const total = parseInt(countResult.rows[0].count);
-        res.json({
-            data: dataResult.rows,
-            pagination: {
-                total,
-                page,
-                limit,
-                totalPages: Math.ceil(total / limit)
-            }
-        });
+        const result = await (0, db_1.query)('SELECT * FROM scraping_executions WHERE user_id = $1 ORDER BY created_at DESC', [req.user.id]);
+        res.json(result.rows);
     }
     catch (error) {
         res.status(500).json({ message: 'Internal server error' });
     }
 };
 exports.getExecutions = getExecutions;
-const getExecutionById = async (req, res) => {
-    try {
-        const result = await (0, db_1.query)('SELECT * FROM scraping_executions WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
-        if (result.rows.length === 0) {
-            return res.status(404).json({ message: 'Execution not found' });
-        }
-        res.json(result.rows[0]);
-    }
-    catch (error) {
-        res.status(500).json({ message: 'Internal server error' });
-    }
-};
-exports.getExecutionById = getExecutionById;
-const getExecutionResults = async (req, res) => {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const offset = (page - 1) * limit;
-    try {
-        // Verify execution belongs to user and check status
-        const execCheck = await (0, db_1.query)('SELECT id, status FROM scraping_executions WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]);
-        if (execCheck.rows.length === 0) {
-            return res.status(404).json({ message: 'Execution not found' });
-        }
-        if (execCheck.rows[0].status !== 'terminado') {
-            return res.status(403).json({
-                message: 'Results available only for finished executions',
-                current_status: execCheck.rows[0].status
-            });
-        }
-        const dataPromise = (0, db_1.query)(`SELECT p.* FROM places p
-       JOIN execution_results er ON p.id = er.place_id
-       WHERE er.execution_id = $1
-       ORDER BY p.title ASC
-       LIMIT $2 OFFSET $3`, [req.params.id, limit, offset]);
-        const countPromise = (0, db_1.query)('SELECT COUNT(*) FROM execution_results WHERE execution_id = $1', [req.params.id]);
-        const [dataResult, countResult] = await Promise.all([dataPromise, countPromise]);
-        const total = parseInt(countResult.rows[0].count);
-        res.json({
-            data: dataResult.rows,
-            pagination: {
-                total,
-                page,
-                limit,
-                totalPages: Math.ceil(total / limit)
-            }
-        });
-    }
-    catch (error) {
-        res.status(500).json({ message: 'Internal server error' });
-    }
-};
-exports.getExecutionResults = getExecutionResults;
-const updateExecutionStatus = async (req, res) => {
-    const { status } = req.body;
-    if (!['running', 'terminado', 'fallido'].includes(status)) {
-        return res.status(400).json({ message: 'Invalid status' });
-    }
-    try {
-        const result = await (0, db_1.query)('UPDATE scraping_executions SET status = $1 WHERE id = $2 RETURNING *', [status, req.params.id]);
-        if (result.rows.length === 0) {
-            return res.status(404).json({ message: 'Execution not found' });
-        }
-        res.json(result.rows[0]);
-    }
-    catch (error) {
-        res.status(500).json({ message: 'Internal server error' });
-    }
-};
-exports.updateExecutionStatus = updateExecutionStatus;
-const getCategories = async (req, res) => {
-    try {
-        const result = await (0, db_1.query)('SELECT name FROM search_categories ORDER BY name ASC');
-        res.json(result.rows.map(r => r.name));
-    }
-    catch (error) {
-        res.status(500).json({ message: 'Internal server error' });
-    }
-};
-exports.getCategories = getCategories;
 //# sourceMappingURL=executionsController.js.map

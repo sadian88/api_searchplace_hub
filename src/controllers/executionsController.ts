@@ -7,30 +7,52 @@ export const launchScraping = async (req: AuthRequest, res: Response) => {
     const {
         search_term, location, language, country, city, state,
         continent, postal_code, latitude, longitude, category,
-        has_website, exact_name
+        has_website, exact_name, search_type, radius, polygon_points
     } = req.body;
 
     try {
         // 1. Create execution record
         const executionResult = await query(
             `INSERT INTO scraping_executions 
-      (user_id, search_term, location, language, country, city, state, continent, postal_code, latitude, longitude, category, has_website, exact_name) 
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) 
+      (user_id, search_term, location, language, country, city, state, continent, postal_code, latitude, longitude, category, has_website, exact_name, search_type, radius, polygon_points) 
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) 
       RETURNING *`,
             [
                 req.user.id, search_term, location, language, country, city, state,
                 continent, postal_code, latitude, longitude, category,
-                has_website, exact_name
+                has_website, exact_name, search_type || 'default', radius || null,
+                polygon_points ? JSON.stringify(polygon_points) : null
             ]
         );
 
         const execution = executionResult.rows[0];
 
         // 2. Trigger real scraping via n8n webhook
-        // We send the execution.id as id_scraping to n8n
+        // We send the full execution data optimized for Apify consumption
         try {
+            const webhookPayload = {
+                id_scraping: execution.id,
+                search_term: execution.search_term,
+                max_leads: req.body.max_leads || 50,
+                category: execution.category,
+                has_website: execution.has_website,
+                // Apify-ready geographic selection
+                customSelection: execution.search_type === 'circle' ? {
+                    type: 'circle',
+                    lat: parseFloat(execution.latitude),
+                    lng: parseFloat(execution.longitude),
+                    radius: (execution.radius || 1) * 1000 // Convert km to meters
+                } : execution.search_type === 'polygon' ? {
+                    type: 'polygon',
+                    points: JSON.parse(execution.polygon_points || '[]').map((p: any) => ({ lat: p[0], lng: p[1] }))
+                } : null,
+                // Support for default location search if no custom selection
+                location: execution.location,
+                search_type: execution.search_type
+            };
+
             await axios.post('https://n8n.hubcapture.com/webhook/placessearch',
-                { id_scraping: execution.id },
+                webhookPayload,
                 {
                     headers: {
                         'api-key': 'R5TSX1aBiQk4HCaXjEKGAZgrU2fhVt97EqFXiUMoV38',
@@ -40,7 +62,6 @@ export const launchScraping = async (req: AuthRequest, res: Response) => {
             );
         } catch (webhookError: any) {
             console.error('Error triggering n8n webhook:', webhookError.message);
-            // We still return 201 because the execution was created, but we log the error
         }
 
         res.status(201).json({
