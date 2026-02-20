@@ -46,9 +46,12 @@ export const launchScraping = async (req: AuthRequest, res: Response) => {
                     type: 'polygon',
                     points: JSON.parse(execution.polygon_points || '[]').map((p: any) => ({ lat: p[0], lng: p[1] }))
                 } : null,
-                // Support for default location search if no custom selection
-                location: execution.location,
-                search_type: execution.search_type
+                // ONLY send text location if there is no custom selection (circle/polygon)
+                // This prevents Apify from getting confused between the coordinates and the broad city name
+                location: (execution.search_type === 'default' || !execution.search_type) ? execution.location : null,
+                search_type: execution.search_type,
+                latitude: parseFloat(execution.latitude),
+                longitude: parseFloat(execution.longitude)
             };
 
             await axios.post('https://n8n.hubcapture.com/webhook/placessearch',
