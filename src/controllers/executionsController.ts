@@ -211,3 +211,50 @@ export const getCategories = async (req: AuthRequest, res: Response) => {
         res.status(500).json({ message: 'Internal server error' });
     }
 };
+
+export const getDashboardStats = async (req: AuthRequest, res: Response) => {
+    try {
+        // 1. Success Rate (Executions with at least 1 result)
+        const successRateQuery = await query(
+            `SELECT 
+                COUNT(*)::int as total,
+                COUNT(CASE WHEN EXISTS (SELECT 1 FROM execution_results er WHERE er.execution_id = se.id) THEN 1 END)::int as successful
+             FROM scraping_executions se 
+             WHERE user_id = $1`,
+            [req.user.id]
+        );
+
+        const { total, successful } = successRateQuery.rows[0];
+        const rate = total > 0 ? Math.round((successful / total) * 10000) / 100 : 0;
+
+        // 2. Timeline (Last 14 days)
+        const timelineQuery = await query(
+            `WITH days AS (
+                SELECT generate_series(
+                    CURRENT_DATE - INTERVAL '13 days',
+                    CURRENT_DATE,
+                    '1 day'::interval
+                )::date as date
+            )
+            SELECT 
+                d.date,
+                COUNT(se.id)::int as count
+            FROM days d
+            LEFT JOIN scraping_executions se ON d.date = se.created_at::date AND se.user_id = $1
+            GROUP BY d.date
+            ORDER BY d.date ASC`,
+            [req.user.id]
+        );
+
+        res.json({
+            successRate: rate,
+            timeline: timelineQuery.rows.map(r => ({
+                date: r.date,
+                count: r.count
+            }))
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: 'Internal server error fetching dashboard stats' });
+    }
+};
